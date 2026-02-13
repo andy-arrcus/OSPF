@@ -1,0 +1,24 @@
+[Unit]
+Description=OSPF v2 Routing Daemon (RFC 2328)
+After=network-online.target
+Wants=network-online.target
+Documentation=https://tools.ietf.org/html/rfc2328
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/ospfd -f -c /etc/ospfd/ospfd.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/run /var/log
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

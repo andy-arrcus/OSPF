@@ -1,0 +1,55 @@
+# ospfd — OSPF v2 Routing Daemon Configuration
+# See RFC 2328 for protocol details.
+
+# Router ID: Manually set, or auto-detected from highest loopback/interface IP.
+# router_id: 10.0.0.1
+
+# Logging
+log_level: info          # debug | info | warning | error
+# log_file: /var/log/ospfd.log
+
+# PID file
+pid_file: /var/run/ospfd.pid
+
+# SPF timers
+timers:
+  spf_delay: 1           # Seconds before running SPF after a trigger
+  spf_hold: 5            # Minimum seconds between SPF runs
+  lsa_refresh: 1800      # Re-originate self LSAs every 30 minutes
+
+# Area definitions
+areas:
+  # Backbone area
+  0.0.0.0:
+    stub: false
+    interfaces:
+      eth0:
+        type: broadcast       # broadcast | point-to-point | nbma | point-to-multipoint
+        cost: 10              # Interface metric
+        priority: 1           # DR election priority (0 = never become DR)
+        hello_interval: 10    # Seconds between Hello packets
+        dead_interval: 40     # Seconds before declaring neighbor dead
+        retransmit_interval: 5
+        transmit_delay: 1
+        passive: false        # true = receive only, no adjacencies
+        auth:
+          type: none          # none | simple | md5
+          # key: "password"   # For simple auth
+          # md5:
+          #   key_id: 1
+          #   key: "secret"
+
+# Uncomment to add another area:
+#  0.0.0.1:
+#    stub: false
+#    interfaces:
+#      eth1:
+#        type: broadcast
+#        cost: 20
+
+# Route redistribution (makes this router an ASBR)
+# redistribute:
+#   static: false
+#   connected: false
+#   metric: 20
+#   metric_type: 2        # 1 = E1 (type 1 external), 2 = E2 (type 2 external)
