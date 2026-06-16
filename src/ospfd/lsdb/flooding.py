@@ -24,6 +24,7 @@ from ospfd.const import (
     INTF_TYPE_P2P,
     INTF_TYPE_VIRTUAL,
     LSA_TYPE_EXTERNAL,
+    LSA_TYPE_OPAQUE_AS,
     MAX_AGE,
     NBR_STATE_EXCHANGE,
     NBR_STATE_FULL,
@@ -41,6 +42,8 @@ if TYPE_CHECKING:
     from ospfd.protocol.neighbor import OspfNeighbor
 
 logger = logging.getLogger(__name__)
+
+MAX_RXMT_LIST = 1000
 
 
 class FloodingEngine:
@@ -80,7 +83,8 @@ class FloodingEngine:
         key = lsa.key
 
         # Step 1: Validate LS type
-        if lsa.header.ls_type < 1 or lsa.header.ls_type > 5:
+        _VALID_LSA_TYPES = {1, 2, 3, 4, 5, 9, 10, 11}
+        if lsa.header.ls_type not in _VALID_LSA_TYPES:
             logger.warning("Unknown LSA type %d from %s", lsa.header.ls_type, neighbor.router_id)
             return
 
@@ -122,9 +126,7 @@ class FloodingEngine:
         elif existing is not None and lsdb.compare_lsa(lsa.header, existing.header) == 0:
             # Step 5: Same instance — implicit acknowledgment
             # Remove from neighbor's retransmission list
-            neighbor.ls_retransmission_list = [
-                l for l in neighbor.ls_retransmission_list if l.key != key
-            ]
+            neighbor.ls_retransmission_list.pop(key, None)
             # If on neighbor's request list, treat as implicit ack
             # Send delayed ack if not on retransmission list
             if interface.intf_type in (INTF_TYPE_BROADCAST, INTF_TYPE_NBMA):
@@ -146,7 +148,7 @@ class FloodingEngine:
         """
         instance = self._instance
 
-        if lsa.header.ls_type == LSA_TYPE_EXTERNAL:
+        if lsa.header.ls_type in (LSA_TYPE_EXTERNAL, LSA_TYPE_OPAQUE_AS):
             # Flood to all non-stub areas
             areas = instance.areas.values()
         else:
@@ -175,8 +177,16 @@ class FloodingEngine:
 
         # Add to retransmission list of each eligible neighbor
         for nbr in eligible:
-            if not any(l.key == lsa.key for l in nbr.ls_retransmission_list):
-                nbr.ls_retransmission_list.append(lsa)
+            if lsa.key not in nbr.ls_retransmission_list:
+                if len(nbr.ls_retransmission_list) >= MAX_RXMT_LIST:
+                    logger.warning(
+                        "Retransmit list full for neighbor %s (%d entries), declaring dead",
+                        nbr.router_id, len(nbr.ls_retransmission_list),
+                    )
+                    from ospfd.const import NBR_EVT_KILL_NBR
+                    nbr.event(NBR_EVT_KILL_NBR)
+                    return
+                nbr.ls_retransmission_list[lsa.key] = lsa
 
         # Determine destination
         if interface.intf_type in (INTF_TYPE_BROADCAST, INTF_TYPE_NBMA):

@@ -6,15 +6,13 @@ integrated with the asyncio event loop via loop.add_reader().
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
 import struct
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import Callable, Optional
 
 from ospfd.const import ALL_D_ROUTERS, ALL_SPF_ROUTERS, IP_TOS_OSPF, OSPF_IP_PROTOCOL
-
-if TYPE_CHECKING:
-    import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +27,10 @@ class OspfSocket:
 
     def __init__(
         self,
-        loop: asyncio.AbstractEventLoop,
         interface_name: str,
         interface_addr: str,
         mtu: int = 1500,
     ):
-        self._loop = loop
         self._interface_name = interface_name
         self._interface_addr = interface_addr
         self._mtu = mtu
@@ -111,7 +107,7 @@ class OspfSocket:
     def register_reader(self, callback: Callable[[], None]) -> None:
         """Register a callback with the asyncio event loop for read events."""
         self._callback = callback
-        self._loop.add_reader(self._sock.fileno(), callback)
+        asyncio.get_running_loop().add_reader(self._sock.fileno(), callback)
 
     def send(self, data: bytes, dest: str) -> None:
         """Send an OSPF packet to a destination address (unicast or multicast)."""
@@ -134,7 +130,7 @@ class OspfSocket:
         """Clean up: remove reader, leave multicast groups, close socket."""
         if self._callback is not None:
             try:
-                self._loop.remove_reader(self._sock.fileno())
+                asyncio.get_running_loop().remove_reader(self._sock.fileno())
             except Exception:
                 pass
         for group in list(self._multicast_groups):

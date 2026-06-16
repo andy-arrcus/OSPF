@@ -30,6 +30,8 @@ from ospfd.const import (
     INTF_TYPE_P2P,
     INTF_TYPE_VIRTUAL,
     LS_REFRESH_TIME,
+    SR_DEFAULT_SRGB_START,
+    SR_DEFAULT_SRGB_SIZE,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,7 +58,7 @@ class AuthConfig:
     """Authentication configuration for an interface."""
 
     type: int = AUTH_NONE
-    key: bytes = b""
+    key: bytearray = field(default_factory=bytearray)
     key_id: int = 0
 
 
@@ -101,6 +103,16 @@ class RedistributeConfig:
 
 
 @dataclass
+class SrConfig:
+    """Segment Routing configuration (RFC 8665)."""
+
+    enabled: bool = False
+    srgb_start: int = SR_DEFAULT_SRGB_START
+    srgb_size: int = SR_DEFAULT_SRGB_SIZE
+    node_sid_index: Optional[int] = None  # global node-SID index
+
+
+@dataclass
 class OspfConfig:
     """Top-level OSPF daemon configuration."""
 
@@ -113,6 +125,7 @@ class OspfConfig:
     lsa_refresh: int = LS_REFRESH_TIME
     areas: list[AreaConfig] = field(default_factory=list)
     redistribute: RedistributeConfig = field(default_factory=RedistributeConfig)
+    sr: SrConfig = field(default_factory=SrConfig)
 
     @classmethod
     def from_yaml(cls, path: str) -> OspfConfig:
@@ -153,6 +166,11 @@ class OspfConfig:
         # Logging
         config.log_level = raw.get("log_level", "info")
         config.log_file = raw.get("log_file")
+        if config.log_file:
+            import pathlib
+            log_path = pathlib.Path(config.log_file).resolve()
+            if not str(log_path).startswith("/var/log/"):
+                raise ValueError(f"log_file must be under /var/log/, got: {config.log_file}")
         config.pid_file = raw.get("pid_file", "/var/run/ospfd.pid")
 
         # Timers
@@ -177,6 +195,16 @@ class OspfConfig:
                 connected=redist_raw.get("connected", False),
                 metric=redist_raw.get("metric", 20),
                 metric_type=redist_raw.get("metric_type", 2),
+            )
+
+        # Segment Routing
+        sr_raw = raw.get("sr", {})
+        if isinstance(sr_raw, dict):
+            config.sr = SrConfig(
+                enabled=sr_raw.get("enabled", False),
+                srgb_start=sr_raw.get("srgb_start", SR_DEFAULT_SRGB_START),
+                srgb_size=sr_raw.get("srgb_size", SR_DEFAULT_SRGB_SIZE),
+                node_sid_index=sr_raw.get("node_sid_index"),
             )
 
         config._validate()
@@ -217,13 +245,13 @@ class OspfConfig:
             auth_config.type = auth_type
             key = auth_raw.get("key", "")
             if isinstance(key, str):
-                auth_config.key = key.encode()
+                auth_config.key = bytearray(key.encode('utf-8'))
             md5_raw = auth_raw.get("md5", {})
             if isinstance(md5_raw, dict):
                 auth_config.key_id = md5_raw.get("key_id", 0)
                 md5_key = md5_raw.get("key", "")
                 if isinstance(md5_key, str):
-                    auth_config.key = md5_key.encode()
+                    auth_config.key = bytearray(md5_key.encode('utf-8'))
 
         return InterfaceConfig(
             name=name,

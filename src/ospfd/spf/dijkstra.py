@@ -7,6 +7,7 @@ using Router LSAs and Network LSAs from the LSDB.
 from __future__ import annotations
 
 import heapq
+import itertools
 import logging
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address
@@ -27,7 +28,7 @@ from ospfd.packet.lsa import Lsa, NetworkLsa, RouterLsa, RouterLsaLink
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class SpfNexthop:
     """A single nexthop: the outgoing interface and next-hop IP address."""
     interface_name: str
@@ -44,7 +45,7 @@ class SpfNexthop:
                 and self.next_hop_ip == other.next_hop_ip)
 
 
-@dataclass
+@dataclass(slots=True)
 class SpfVertex:
     """A vertex in the SPF tree."""
     vertex_id: IPv4Address
@@ -91,11 +92,10 @@ class DijkstraEngine:
         tree: dict[IPv4Address, SpfVertex] = {}
         # Candidate list (priority queue)
         candidates: list[tuple[int, int, SpfVertex]] = []
-        counter = 0  # tie-breaker for heapq
+        counter = itertools.count()  # tie-breaker for heapq
 
         # Initialize with root
-        heapq.heappush(candidates, (0, counter, root))
-        counter += 1
+        heapq.heappush(candidates, (0, next(counter), root))
 
         while candidates:
             dist, _, vertex = heapq.heappop(candidates)
@@ -115,11 +115,6 @@ class DijkstraEngine:
                     vertex, area_id, lsdb, tree, candidates, counter, instance
                 )
 
-            # counter may have been updated in the process methods
-            # We use a mutable list trick for counter
-            # Actually, let's just use a different approach:
-            counter = self._counter
-
         logger.debug("SPF for area %s: %d vertices in tree", area_id, len(tree))
         return tree
 
@@ -128,7 +123,6 @@ class DijkstraEngine:
         lsdb, tree, candidates, counter, instance
     ) -> None:
         """Process links from a Router LSA vertex."""
-        self._counter = counter
         if not isinstance(vertex.lsa.body, RouterLsa):
             return
 
@@ -153,7 +147,7 @@ class DijkstraEngine:
                 new_dist = vertex.distance + link.metric
                 self._update_candidate(
                     candidates, tree, net_lsa.header.link_state_id,
-                    SPF_VERTEX_NETWORK, net_lsa, new_dist, vertex, instance, link
+                    SPF_VERTEX_NETWORK, net_lsa, new_dist, vertex, instance, link, counter
                 )
 
             elif link.type == LINK_TYPE_P2P:
@@ -168,7 +162,7 @@ class DijkstraEngine:
                 new_dist = vertex.distance + link.metric
                 self._update_candidate(
                     candidates, tree, link.link_id,
-                    SPF_VERTEX_ROUTER, nbr_lsa, new_dist, vertex, instance, link
+                    SPF_VERTEX_ROUTER, nbr_lsa, new_dist, vertex, instance, link, counter
                 )
 
     def _process_network_vertex(
@@ -176,7 +170,6 @@ class DijkstraEngine:
         lsdb, tree, candidates, counter, instance
     ) -> None:
         """Process links from a Network LSA vertex."""
-        self._counter = counter
         if not isinstance(vertex.lsa.body, NetworkLsa):
             return
 
@@ -192,12 +185,12 @@ class DijkstraEngine:
             new_dist = vertex.distance + 0  # Network vertex to router is cost 0
             self._update_candidate(
                 candidates, tree, rtr_id,
-                SPF_VERTEX_ROUTER, rtr_lsa, new_dist, vertex, instance, None
+                SPF_VERTEX_ROUTER, rtr_lsa, new_dist, vertex, instance, None, counter
             )
 
     def _update_candidate(
         self, candidates, tree, vertex_id, vertex_type,
-        lsa, new_dist, parent, instance, link
+        lsa, new_dist, parent, instance, link, counter
     ) -> None:
         """Add or update a candidate vertex."""
         # Calculate nexthops
@@ -216,8 +209,7 @@ class DijkstraEngine:
             nexthops=nexthops,
         )
 
-        heapq.heappush(candidates, (new_dist, self._counter, new_vertex))
-        self._counter += 1
+        heapq.heappush(candidates, (new_dist, next(counter), new_vertex))
 
     def _calculate_nexthops(
         self, parent: SpfVertex, dest_id: IPv4Address,

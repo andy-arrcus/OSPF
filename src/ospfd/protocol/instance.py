@@ -50,6 +50,9 @@ from ospfd.spf.external import calculate_external_routes
 from ospfd.spf.inter_area import calculate_asbr_routes, calculate_inter_area_routes
 from ospfd.spf.intra_area import calculate_intra_area_routes
 from ospfd.spf.routing_table import OspfRoutingTable
+from ospfd.sr.database import SrDatabase
+from ospfd.sr.origination import SrOriginator
+from ospfd.sr.tlv import SidLabelRange
 from ospfd.util.identifier import select_router_id
 from ospfd.util.ip import prefix_len_to_mask
 
@@ -59,9 +62,8 @@ logger = logging.getLogger(__name__)
 class OspfInstance:
     """Top-level OSPF protocol instance."""
 
-    def __init__(self, config: OspfConfig, loop: asyncio.AbstractEventLoop):
+    def __init__(self, config: OspfConfig):
         self.config = config
-        self.loop = loop
         self.router_id: IPv4Address = IPv4Address("0.0.0.0")
         self.options: int = OPT_E  # E-bit set for non-stub areas
         self.is_asbr: bool = config.redistribute.static or config.redistribute.connected
@@ -80,6 +82,10 @@ class OspfInstance:
 
         # Netlink
         self._netlink: Optional[NetlinkManager] = None
+
+        # SR subsystem
+        self.sr_db = SrDatabase()
+        self._sr_originator: Optional[SrOriginator] = None
 
         # SPF scheduling
         self._spf_pending = False
@@ -154,7 +160,6 @@ class OspfInstance:
                     ip_addr=ip_addr,
                     ip_mask=ip_mask,
                     instance=self,
-                    loop=self.loop,
                     mtu=sys_intf.mtu,
                     if_index=sys_intf.index,
                 )
@@ -163,7 +168,7 @@ class OspfInstance:
                 if not intf_config.passive:
                     try:
                         sock = OspfSocket(
-                            self.loop, intf_config.name, str(ip_addr), sys_intf.mtu
+                            intf_config.name, str(ip_addr), sys_intf.mtu
                         )
                         sock.register_reader(
                             lambda i=intf, s=sock: self._receive_packet(i, s)
@@ -188,6 +193,24 @@ class OspfInstance:
         # Originate initial Router LSAs
         for area_id in self.areas:
             self.originator.originate_router_lsa(area_id)
+
+        # Initialize SR subsystem if enabled
+        if self.config.sr.enabled:
+            srgb = SidLabelRange(
+                start=self.config.sr.srgb_start,
+                size=self.config.sr.srgb_size,
+            )
+            self._sr_originator = SrOriginator(self, srgb)
+            for area_id in self.areas:
+                self._sr_originator.originate_ri_lsa(area_id)
+            if self.config.sr.node_sid_index is not None:
+                for area_id in self.areas:
+                    for intf in self.get_interfaces_for_area(area_id):
+                        from ospfd.util.ip import ip_to_network
+                        net = ip_to_network(intf.ip_addr, intf.ip_mask)
+                        self._sr_originator.originate_prefix_sid_lsa(
+                            area_id, net, self.config.sr.node_sid_index
+                        )
 
         logger.info(
             "OSPF instance started: %d areas, %d interfaces",
@@ -218,9 +241,11 @@ class OspfInstance:
             return  # Ignore our own packets
         if header.length > len(data):
             return
+        if header.length < OSPF_HDR_LEN:
+            return
 
         # Verify checksum
-        if header.auth_type == 0:
+        if interface.auth_type == 0:
             if not verify_ip_checksum(data[:header.length]):
                 logger.debug("Checksum failed from %s", src_addr)
                 return
@@ -238,6 +263,15 @@ class OspfInstance:
                 header.area_id, interface.area_id, src_addr,
             )
             return
+
+        # Reject packets from off-link sources on broadcast interfaces
+        from ospfd.const import INTF_TYPE_BROADCAST
+        if interface.intf_type == INTF_TYPE_BROADCAST:
+            src_net = int(IPv4Address(src_addr)) & int(interface.ip_mask)
+            intf_net = int(interface.ip_addr) & int(interface.ip_mask)
+            if src_net != intf_net:
+                logger.debug("Off-link source %s on interface %s, dropping", src_addr, interface.name)
+                return
 
         # Dispatch by type
         body_data = data[OSPF_HDR_LEN:header.length]
@@ -294,7 +328,7 @@ class OspfInstance:
         if elapsed < self.config.spf_hold:
             delay = max(delay, self.config.spf_hold - elapsed)
 
-        self._spf_timer = self.loop.call_later(delay, self._run_spf)
+        self._spf_timer = asyncio.get_running_loop().call_later(delay, self._run_spf)
 
     def _run_spf(self) -> None:
         """Execute the full SPF calculation and update routing table."""
@@ -346,6 +380,20 @@ class OspfInstance:
         if self._netlink:
             self.routing_table.sync_to_kernel(self._netlink, added, changed, removed)
 
+        # SR post-SPF processing
+        if self.config.sr.enabled and self._sr_originator:
+            for area_id in self.areas:
+                self.sr_db.rebuild(self.lsdb, area_id)
+            from ospfd.sr.spf import compute_sr_routes
+            for area_id, tree in spf_trees.items():
+                sr_routes = compute_sr_routes(
+                    tree, self.sr_db, self.router_id,
+                    self.config.sr.srgb_start,
+                )
+                if self._netlink and sr_routes:
+                    self._netlink.install_sr_routes(sr_routes)
+            logger.info("SR database rebuilt: %d SR nodes", len(self.sr_db.get_all_nodes()))
+
         logger.info(
             "SPF done: %d intra, %d inter, %d external routes "
             "(%d added, %d changed, %d removed)",
@@ -359,7 +407,7 @@ class OspfInstance:
         """Schedule Router LSA re-origination for an area (debounced)."""
         if area_id in self._router_lsa_pending:
             return
-        handle = self.loop.call_later(
+        handle = asyncio.get_running_loop().call_later(
             1.0, self._originate_router_lsa, area_id
         )
         self._router_lsa_pending[area_id] = handle
@@ -373,7 +421,7 @@ class OspfInstance:
         key = interface.name
         if key in self._network_lsa_pending:
             return
-        handle = self.loop.call_later(
+        handle = asyncio.get_running_loop().call_later(
             1.0, self._originate_network_lsa, interface
         )
         self._network_lsa_pending[key] = handle

@@ -9,15 +9,15 @@ Supports:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import struct
-import time
 from dataclasses import dataclass
 
 from ospfd.const import AUTH_MD5, AUTH_NONE, AUTH_SIMPLE
 
 
 def apply_auth(packet: bytearray, auth_type: int, auth_key: bytes = b"",
-               key_id: int = 0) -> bytes:
+               key_id: int = 0, crypt_seq: int = 0) -> bytes:
     """Apply authentication to a serialized OSPF packet.
 
     The packet must have the auth fields (bytes 16-23) zeroed before checksum
@@ -53,7 +53,6 @@ def apply_auth(packet: bytearray, auth_type: int, auth_key: bytes = b"",
         #   1: key_id
         #   2: auth_data_len (16 for MD5)
         #   3-7: cryptographic sequence number (4 bytes)
-        crypt_seq = int(time.time()) & 0xFFFFFFFF
         packet[16] = 0
         packet[17] = key_id & 0xFF
         packet[18] = 16  # MD5 digest length
@@ -101,7 +100,7 @@ def verify_auth(packet: bytes, auth_type: int, auth_key: bytes = b"",
     elif auth_type == AUTH_SIMPLE:
         pkt_key = packet[16:24]
         expected = auth_key[:8].ljust(8, b"\x00")
-        return pkt_key == expected
+        return hmac.compare_digest(bytes(pkt_key), bytes(expected))
 
     elif auth_type == AUTH_MD5:
         if len(packet) < 24 + 16:  # need appended digest
@@ -126,6 +125,6 @@ def verify_auth(packet: bytes, auth_type: int, auth_key: bytes = b"",
         md5.update(key_padded)
         expected_digest = md5.digest()
 
-        return received_digest == expected_digest
+        return hmac.compare_digest(bytes(received_digest), bytes(expected_digest))
 
     return False

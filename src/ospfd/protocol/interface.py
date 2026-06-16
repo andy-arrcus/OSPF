@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from ipaddress import IPv4Address
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 from ospfd.const import (
     ALL_D_ROUTERS,
@@ -55,7 +55,6 @@ from ospfd.packet.auth import apply_auth
 from ospfd.protocol.neighbor import OspfNeighbor
 
 if TYPE_CHECKING:
-    import asyncio
     from ospfd.config import InterfaceConfig
     from ospfd.io.raw_socket import OspfSocket
     from ospfd.protocol.instance import OspfInstance
@@ -63,6 +62,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ZERO_ADDR = IPv4Address("0.0.0.0")
+MAX_NEIGHBORS = 128
 
 
 class OspfInterface:
@@ -79,7 +79,6 @@ class OspfInterface:
         ip_addr: IPv4Address,
         ip_mask: IPv4Address,
         instance: OspfInstance,
-        loop: asyncio.AbstractEventLoop,
         mtu: int = 1500,
         if_index: int = 0,
     ):
@@ -106,7 +105,6 @@ class OspfInterface:
 
         # Back-references
         self.instance = instance
-        self._loop = loop
 
         # State
         self.state: int = INTF_STATE_DOWN
@@ -123,20 +121,23 @@ class OspfInterface:
         from ospfd.util.timer import PeriodicTimer, OneShotTimer
 
         self._hello_timer = PeriodicTimer(
-            loop, self.hello_interval, self._send_hello,
+            self.hello_interval, self._send_hello,
             jitter=0.1, name=f"hello-{self.name}",
         )
         self._wait_timer = OneShotTimer(
-            loop, self.dead_interval, self._wait_timer_fire,
+            self.dead_interval, self._wait_timer_fire,
             name=f"wait-{self.name}",
         )
 
         # Delayed ACK queue
         self._delayed_acks: list = []
         self._ack_timer = PeriodicTimer(
-            loop, 1.0, self._flush_delayed_acks,
+            1.0, self._flush_delayed_acks,
             name=f"ack-{self.name}",
         )
+
+        # MD5 auth sequence counter (monotonically increasing)
+        self._crypt_seq: int = int(__import__('time').time()) & 0xFFFFFFFF
 
     # ── FSM ─────────────────────────────────────────────────────────
 
@@ -214,7 +215,7 @@ class OspfInterface:
 
     # ── FSM Table ───────────────────────────────────────────────────
 
-    _FSM: dict[tuple[int, int], callable] = {}
+    _FSM: dict[tuple[int, int], Callable[[OspfInterface], None]] = {}
 
     @classmethod
     def _build_fsm(cls) -> None:
@@ -298,44 +299,6 @@ class OspfInterface:
 
     # ── Hello Processing ────────────────────────────────────────────
 
-    def receive_hello(self, hello: HelloPacket, src_addr: IPv4Address) -> None:
-        """Process a received Hello packet per Section 10.5.
-
-        1. Validate HelloInterval and DeadInterval match.
-        2. Validate network mask (broadcast only).
-        3. Check E-bit match.
-        4. Find or create neighbor.
-        5. Update neighbor fields.
-        6. Check for 2-way.
-        7. Check for DR/BDR changes.
-        """
-        # Validation
-        if hello.hello_interval != self.hello_interval:
-            logger.warning("Hello interval mismatch from %s on %s", src_addr, self.name)
-            return
-        if hello.dead_interval != self.dead_interval:
-            logger.warning("Dead interval mismatch from %s on %s", src_addr, self.name)
-            return
-
-        if self.intf_type == INTF_TYPE_BROADCAST:
-            if hello.network_mask != self.ip_mask:
-                logger.warning("Network mask mismatch from %s on %s", src_addr, self.name)
-                return
-
-        # E-bit check
-        my_options = self.instance.options
-        if (hello.options & OPT_E) != (my_options & OPT_E):
-            logger.warning("E-bit mismatch from %s on %s", src_addr, self.name)
-            return
-
-        # Find or create neighbor by router ID from the OSPF header
-        # The caller should have set src_router_id on this call
-        # We use src_addr to find/index neighbor, but actually OSPF identifies
-        # neighbors by router ID (from the packet header).
-        # We need router_id from the OSPF header — it's passed via the instance dispatcher.
-        # For now, we look up by src_addr as a key in neighbors, but the actual
-        # design uses router_id. We'll handle this by having the instance pass router_id.
-
     def process_hello(
         self, hello: HelloPacket, src_addr: IPv4Address, router_id: IPv4Address
     ) -> None:
@@ -358,7 +321,13 @@ class OspfInterface:
         # Find or create neighbor
         nbr = self.neighbors.get(router_id)
         if nbr is None:
-            nbr = OspfNeighbor(router_id, src_addr, self, self._loop)
+            if len(self.neighbors) >= MAX_NEIGHBORS:
+                logger.warning(
+                    "Neighbor limit (%d) reached on %s, ignoring router_id %s",
+                    MAX_NEIGHBORS, self.name, router_id,
+                )
+                return
+            nbr = OspfNeighbor(router_id, src_addr, self)
             self.neighbors[router_id] = nbr
             logger.info("New neighbor %s (%s) on %s", router_id, src_addr, self.name)
 
@@ -499,7 +468,8 @@ class OspfInterface:
         raw[13] = chksum & 0xFF
 
         # Apply authentication
-        final = apply_auth(raw, self.auth_type, self.auth_key, self.auth_key_id)
+        self._crypt_seq = (self._crypt_seq + 1) & 0xFFFFFFFF
+        final = apply_auth(raw, self.auth_type, self.auth_key, self.auth_key_id, self._crypt_seq)
 
         self.socket.send(final, dest_str)
 

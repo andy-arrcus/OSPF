@@ -1,8 +1,7 @@
 """Tests for the OSPF neighbor state machine."""
 
 import asyncio
-import pytest
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock
 from ipaddress import IPv4Address
 
 from ospfd.const import (
@@ -17,8 +16,6 @@ from ospfd.const import (
 
 def _make_neighbor(intf_type=INTF_TYPE_P2P, intf_state=INTF_STATE_P2P):
     """Create a mock neighbor for testing."""
-    loop = asyncio.new_event_loop()
-
     mock_instance = MagicMock()
     mock_instance.router_id = IPv4Address("10.0.0.1")
     mock_instance.options = 0x02
@@ -46,93 +43,97 @@ def _make_neighbor(intf_type=INTF_TYPE_P2P, intf_state=INTF_STATE_P2P):
     mock_intf.area_id = IPv4Address("0.0.0.0")
 
     from ospfd.protocol.neighbor import OspfNeighbor
-    nbr = OspfNeighbor(
+    return OspfNeighbor(
         router_id=IPv4Address("10.0.0.2"),
         ip_addr=IPv4Address("10.0.0.2"),
         interface=mock_intf,
-        loop=loop,
     )
-    return nbr, loop
 
 
 class TestNeighborFSM:
     def test_initial_state_is_down(self):
-        nbr, loop = _make_neighbor()
+        nbr = _make_neighbor()
         assert nbr.state == NBR_STATE_DOWN
-        loop.close()
 
     def test_hello_received_down_to_init(self):
-        nbr, loop = _make_neighbor()
-        nbr.event(NBR_EVT_HELLO_RECEIVED)
-        assert nbr.state == NBR_STATE_INIT
-        loop.close()
+        async def run():
+            nbr = _make_neighbor()
+            nbr.event(NBR_EVT_HELLO_RECEIVED)
+            assert nbr.state == NBR_STATE_INIT
+        asyncio.run(run())
 
     def test_two_way_received_init_to_exstart_p2p(self):
         """On P2P, 2-Way should proceed to ExStart."""
-        nbr, loop = _make_neighbor(intf_type=INTF_TYPE_P2P)
-        nbr.event(NBR_EVT_HELLO_RECEIVED)
-        assert nbr.state == NBR_STATE_INIT
-        nbr.event(NBR_EVT_2WAY_RECEIVED)
-        assert nbr.state == NBR_STATE_EXSTART
-        loop.close()
+        async def run():
+            nbr = _make_neighbor(intf_type=INTF_TYPE_P2P)
+            nbr.event(NBR_EVT_HELLO_RECEIVED)
+            assert nbr.state == NBR_STATE_INIT
+            nbr.event(NBR_EVT_2WAY_RECEIVED)
+            assert nbr.state == NBR_STATE_EXSTART
+        asyncio.run(run())
 
     def test_negotiation_done_exstart_to_exchange(self):
-        nbr, loop = _make_neighbor()
-        nbr.state = NBR_STATE_EXSTART
-        nbr.event(NBR_EVT_NEGOTIATION_DONE)
-        assert nbr.state == NBR_STATE_EXCHANGE
-        loop.close()
+        async def run():
+            nbr = _make_neighbor()
+            nbr.state = NBR_STATE_EXSTART
+            nbr.event(NBR_EVT_NEGOTIATION_DONE)
+            assert nbr.state == NBR_STATE_EXCHANGE
+        asyncio.run(run())
 
     def test_exchange_done_to_full_empty_request(self):
-        nbr, loop = _make_neighbor()
-        nbr.state = NBR_STATE_EXCHANGE
-        nbr.ls_request_list = []
-        nbr.event(NBR_EVT_EXCHANGE_DONE)
-        assert nbr.state == NBR_STATE_FULL
-        loop.close()
+        async def run():
+            nbr = _make_neighbor()
+            nbr.state = NBR_STATE_EXCHANGE
+            nbr.ls_request_list = {}
+            nbr.event(NBR_EVT_EXCHANGE_DONE)
+            assert nbr.state == NBR_STATE_FULL
+        asyncio.run(run())
 
     def test_exchange_done_to_loading(self):
-        nbr, loop = _make_neighbor()
-        nbr.state = NBR_STATE_EXCHANGE
-        # Put something in request list
-        from ospfd.packet.lsa import LsaHeader
-        nbr.ls_request_list = [
-            LsaHeader(ls_age=0, options=0, ls_type=1,
-                      link_state_id=IPv4Address("10.0.0.2"),
-                      advertising_router=IPv4Address("10.0.0.2"),
-                      ls_sequence_number=0x80000001,
-                      ls_checksum=0, length=20),
-        ]
-        nbr.event(NBR_EVT_EXCHANGE_DONE)
-        assert nbr.state == NBR_STATE_LOADING
-        loop.close()
+        async def run():
+            nbr = _make_neighbor()
+            nbr.state = NBR_STATE_EXCHANGE
+            from ospfd.packet.lsa import LsaHeader
+            hdr = LsaHeader(ls_age=0, options=0, ls_type=1,
+                            link_state_id=IPv4Address("10.0.0.2"),
+                            advertising_router=IPv4Address("10.0.0.2"),
+                            ls_sequence_number=0x80000001,
+                            ls_checksum=0, length=20)
+            nbr.ls_request_list = {hdr.key: hdr}
+            nbr.event(NBR_EVT_EXCHANGE_DONE)
+            assert nbr.state == NBR_STATE_LOADING
+        asyncio.run(run())
 
     def test_loading_done_to_full(self):
-        nbr, loop = _make_neighbor()
-        nbr.state = NBR_STATE_LOADING
-        nbr.event(NBR_EVT_LOADING_DONE)
-        assert nbr.state == NBR_STATE_FULL
-        loop.close()
+        async def run():
+            nbr = _make_neighbor()
+            nbr.state = NBR_STATE_LOADING
+            nbr.event(NBR_EVT_LOADING_DONE)
+            assert nbr.state == NBR_STATE_FULL
+        asyncio.run(run())
 
     def test_kill_nbr_any_to_down(self):
-        nbr, loop = _make_neighbor()
-        for initial_state in [NBR_STATE_INIT, NBR_STATE_2WAY, NBR_STATE_EXSTART,
-                              NBR_STATE_EXCHANGE, NBR_STATE_LOADING, NBR_STATE_FULL]:
-            nbr.state = initial_state
-            nbr.event(NBR_EVT_KILL_NBR)
-            assert nbr.state == NBR_STATE_DOWN
-        loop.close()
+        async def run():
+            nbr = _make_neighbor()
+            for initial_state in [NBR_STATE_INIT, NBR_STATE_2WAY, NBR_STATE_EXSTART,
+                                  NBR_STATE_EXCHANGE, NBR_STATE_LOADING, NBR_STATE_FULL]:
+                nbr.state = initial_state
+                nbr.event(NBR_EVT_KILL_NBR)
+                assert nbr.state == NBR_STATE_DOWN
+        asyncio.run(run())
 
     def test_inactivity_timer_to_down(self):
-        nbr, loop = _make_neighbor()
-        nbr.state = NBR_STATE_FULL
-        nbr.event(NBR_EVT_INACTIVITY_TIMER)
-        assert nbr.state == NBR_STATE_DOWN
-        loop.close()
+        async def run():
+            nbr = _make_neighbor()
+            nbr.state = NBR_STATE_FULL
+            nbr.event(NBR_EVT_INACTIVITY_TIMER)
+            assert nbr.state == NBR_STATE_DOWN
+        asyncio.run(run())
 
     def test_one_way_full_to_init(self):
-        nbr, loop = _make_neighbor()
-        nbr.state = NBR_STATE_FULL
-        nbr.event(NBR_EVT_1WAY)
-        assert nbr.state == NBR_STATE_INIT
-        loop.close()
+        async def run():
+            nbr = _make_neighbor()
+            nbr.state = NBR_STATE_FULL
+            nbr.event(NBR_EVT_1WAY)
+            assert nbr.state == NBR_STATE_INIT
+        asyncio.run(run())

@@ -71,28 +71,19 @@ class NetlinkManager:
         addr_map: dict[int, list[tuple[IPv4Address, int]]] = {}
         for a in addrs:
             idx = a["index"]
-            for attr_name, attr_value in a["attrs"]:
-                if attr_name == "IFA_ADDRESS":
-                    addr_map.setdefault(idx, []).append(
-                        (IPv4Address(attr_value), a["prefixlen"])
-                    )
+            addr_val = a.get_attr("IFA_ADDRESS")
+            if addr_val is not None:
+                addr_map.setdefault(idx, []).append(
+                    (IPv4Address(addr_val), a["prefixlen"])
+                )
 
         for link in links:
             idx = link["index"]
-            name = ""
-            mac = ""
-            mtu = 1500
-            state = "down"
-
-            for attr_name, attr_value in link["attrs"]:
-                if attr_name == "IFLA_IFNAME":
-                    name = attr_value
-                elif attr_name == "IFLA_MTU":
-                    mtu = attr_value
-                elif attr_name == "IFLA_ADDRESS":
-                    mac = attr_value
-                elif attr_name == "IFLA_OPERSTATE":
-                    state = attr_value.lower() if isinstance(attr_value, str) else "down"
+            name = link.get_attr("IFLA_IFNAME") or ""
+            mac = link.get_attr("IFLA_ADDRESS") or ""
+            mtu = link.get_attr("IFLA_MTU") or 1500
+            operstate = link.get_attr("IFLA_OPERSTATE")
+            state = operstate.lower() if isinstance(operstate, str) else "down"
 
             if state != "up" or idx not in addr_map:
                 continue
@@ -180,11 +171,7 @@ class NetlinkManager:
             count = 0
             for route in routes:
                 try:
-                    dst = None
-                    for attr_name, attr_value in route["attrs"]:
-                        if attr_name == "RTA_DST":
-                            dst = attr_value
-                            break
+                    dst = route.get_attr("RTA_DST")
                     if dst:
                         prefix_len = route.get("dst_len", 32)
                         self._ipr.route(
@@ -198,6 +185,31 @@ class NetlinkManager:
             logger.info("Flushed %d OSPF routes", count)
         except Exception as e:
             logger.error("Failed to flush OSPF routes: %s", e)
+
+    def install_sr_routes(self, sr_routes) -> None:
+        """Install SR/MPLS routes via Netlink."""
+        from ospfd.const import MPLS_LABEL_IMPLICIT_NULL
+        for route in sr_routes:
+            try:
+                if route.outgoing_label == MPLS_LABEL_IMPLICIT_NULL:
+                    # PHP: forward without label (plain IP)
+                    self._ipr.route(
+                        "replace",
+                        dst=str(route.destination),
+                        gateway=str(route.nexthop_ip),
+                        proto=88,  # proto=88 for SR routes
+                    )
+                else:
+                    # Push label
+                    self._ipr.route(
+                        "replace",
+                        dst=str(route.destination),
+                        gateway=str(route.nexthop_ip),
+                        encap={"type": "mpls", "labels": route.outgoing_label},
+                        proto=88,
+                    )
+            except Exception as e:
+                logger.debug("Failed to install SR route %s: %s", route.destination, e)
 
     def close(self) -> None:
         """Close the Netlink socket."""

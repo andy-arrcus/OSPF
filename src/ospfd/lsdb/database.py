@@ -13,6 +13,7 @@ from typing import Optional
 
 from ospfd.const import (
     LSA_TYPE_EXTERNAL,
+    LSA_TYPE_OPAQUE_AS,
     MAX_AGE,
     MAX_AGE_DIFF,
     MIN_LS_ARRIVAL,
@@ -20,6 +21,9 @@ from ospfd.const import (
 from ospfd.packet.lsa import Lsa, LsaHeader
 
 logger = logging.getLogger(__name__)
+
+MAX_LSDB_SIZE_PER_AREA = 10_000
+MAX_LSDB_EXTERNAL_SIZE = 10_000
 
 # LSA key type: (ls_type, link_state_id, advertising_router)
 LsaKey = tuple[int, IPv4Address, IPv4Address]
@@ -53,7 +57,7 @@ class LinkStateDatabase:
     def lookup(self, area_id: IPv4Address, key: LsaKey) -> Optional[Lsa]:
         """Look up an LSA by key in the specified area (or external DB)."""
         ls_type = key[0]
-        if ls_type == LSA_TYPE_EXTERNAL:
+        if ls_type in (LSA_TYPE_EXTERNAL, LSA_TYPE_OPAQUE_AS):
             return self._external.get(key)
         area_db = self._areas.get(area_id, {})
         return area_db.get(key)
@@ -71,11 +75,27 @@ class LinkStateDatabase:
         now = time.monotonic()
 
         # Get the right database partition
-        if lsa.header.ls_type == LSA_TYPE_EXTERNAL:
+        if lsa.header.ls_type in (LSA_TYPE_EXTERNAL, LSA_TYPE_OPAQUE_AS):
             db = self._external
         else:
             self.ensure_area(area_id)
             db = self._areas[area_id]
+
+        # Enforce size limit for new LSA keys
+        if lsa.key not in db and len(db) >= MAX_LSDB_SIZE_PER_AREA:
+            logger.warning(
+                "LSDB area %s full (%d LSAs), dropping type=%d id=%s adv=%s",
+                area_id, len(db), lsa.header.ls_type,
+                lsa.header.link_state_id, lsa.header.advertising_router,
+            )
+            return False, None
+
+        if lsa.key not in db and lsa.header.ls_type == LSA_TYPE_EXTERNAL and len(self._external) >= MAX_LSDB_EXTERNAL_SIZE:
+            logger.warning(
+                "LSDB external DB full (%d LSAs), dropping id=%s adv=%s",
+                len(self._external), lsa.header.link_state_id, lsa.header.advertising_router,
+            )
+            return False, None
 
         old = db.get(key)
 
@@ -105,7 +125,7 @@ class LinkStateDatabase:
 
     def remove(self, area_id: IPv4Address, key: LsaKey) -> Optional[Lsa]:
         """Remove an LSA from the database."""
-        if key[0] == LSA_TYPE_EXTERNAL:
+        if key[0] in (LSA_TYPE_EXTERNAL, LSA_TYPE_OPAQUE_AS):
             return self._external.pop(key, None)
         area_db = self._areas.get(area_id)
         if area_db:

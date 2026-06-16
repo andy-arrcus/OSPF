@@ -18,10 +18,7 @@ def ip_checksum(data: bytes) -> int:
     """
     if len(data) % 2:
         data = data + b"\x00"
-    total = 0
-    for i in range(0, len(data), 2):
-        total += struct.unpack("!H", data[i : i + 2])[0]
-    # Fold 32-bit sum to 16 bits
+    total = sum(v for (v,) in struct.iter_unpack("!H", data))
     while total >> 16:
         total = (total & 0xFFFF) + (total >> 16)
     return ~total & 0xFFFF
@@ -31,9 +28,7 @@ def verify_ip_checksum(data: bytes) -> bool:
     """Verify IP checksum. Returns True if valid (result should be 0)."""
     if len(data) % 2:
         data = data + b"\x00"
-    total = 0
-    for i in range(0, len(data), 2):
-        total += struct.unpack("!H", data[i : i + 2])[0]
+    total = sum(v for (v,) in struct.iter_unpack("!H", data))
     while total >> 16:
         total = (total & 0xFFFF) + (total >> 16)
     return total == 0xFFFF

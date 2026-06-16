@@ -29,6 +29,7 @@ class OspfDaemon:
         self._config: Optional[OspfConfig] = None
         self._instance: Optional[OspfInstance] = None
         self._foreground: bool = False
+        self._debug: bool = False
         self._config_path: str = "/etc/ospfd/ospfd.yaml"
         self._pid_file: Optional[str] = None
 
@@ -82,7 +83,7 @@ class OspfDaemon:
         except FileNotFoundError:
             print(f"Error: Config file not found: {self._config_path}", file=sys.stderr)
             sys.exit(1)
-        except (ValueError, Exception) as e:
+        except Exception as e:
             print(f"Error: Invalid config: {e}", file=sys.stderr)
             sys.exit(1)
 
@@ -113,24 +114,31 @@ class OspfDaemon:
         # Redirect std file descriptors
         sys.stdout.flush()
         sys.stderr.flush()
-        devnull = open(os.devnull, "r+b")
-        os.dup2(devnull.fileno(), sys.stdin.fileno())
-        if self._config.log_file:
-            # Keep stderr for crash output
-            pass
-        else:
-            os.dup2(devnull.fileno(), sys.stdout.fileno())
-            os.dup2(devnull.fileno(), sys.stderr.fileno())
+        devnull_fd = os.open(os.devnull, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            os.dup2(devnull_fd, sys.stdin.fileno())
+            if not self._config.log_file:
+                os.dup2(devnull_fd, sys.stdout.fileno())
+                os.dup2(devnull_fd, sys.stderr.fileno())
+        finally:
+            os.close(devnull_fd)
 
     def _write_pid(self) -> None:
-        """Write PID file."""
         if not self._pid_file:
             return
         try:
             pid_path = Path(self._pid_file)
             pid_path.parent.mkdir(parents=True, exist_ok=True)
-            pid_path.write_text(str(os.getpid()) + "\n")
+            fd = os.open(str(pid_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            try:
+                os.write(fd, (str(os.getpid()) + "\n").encode())
+            finally:
+                os.close(fd)
             logger.info("PID %d written to %s", os.getpid(), self._pid_file)
+        except FileExistsError:
+            logger.error("PID file %s already exists — another instance may be running", self._pid_file)
+            import sys
+            sys.exit(1)
         except OSError as e:
             logger.warning("Failed to write PID file %s: %s", self._pid_file, e)
 
@@ -148,7 +156,7 @@ class OspfDaemon:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        self._instance = OspfInstance(self._config, loop)
+        self._instance = OspfInstance(self._config)
 
         # Signal handlers
         for sig in (signal.SIGTERM, signal.SIGINT):

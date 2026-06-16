@@ -52,7 +52,7 @@ LSA_HDR_FORMAT = "!HBB4s4sIHH"
 LSA_HDR_LEN = 20
 
 
-@dataclass
+@dataclass(slots=True)
 class LsaHeader:
     """20-byte LSA header common to all LSA types."""
 
@@ -126,7 +126,7 @@ TOS_METRIC_FORMAT = "!BBH"  # tos(1), reserved(1), tos_metric(2)
 TOS_METRIC_LEN = 4
 
 
-@dataclass
+@dataclass(slots=True)
 class RouterLsaLink:
     """A single link in a Router LSA."""
 
@@ -156,6 +156,8 @@ class RouterLsaLink:
         link_id_bytes, link_data_bytes, ltype, num_tos, metric = struct.unpack_from(
             ROUTER_LINK_FORMAT, data, offset
         )
+        if num_tos * TOS_METRIC_LEN > len(data) - (offset + ROUTER_LINK_LEN):
+            raise ValueError(f"RouterLsaLink num_tos {num_tos} exceeds available data")
         tos_metrics = []
         pos = offset + ROUTER_LINK_LEN
         for _ in range(num_tos):
@@ -173,7 +175,7 @@ class RouterLsaLink:
         return link, pos - offset
 
 
-@dataclass
+@dataclass(slots=True)
 class RouterLsa:
     """Type 1: Router LSA body."""
 
@@ -190,6 +192,9 @@ class RouterLsa:
     @classmethod
     def deserialize(cls, data: bytes, offset: int = 0) -> RouterLsa:
         flags, _, num_links = struct.unpack_from(ROUTER_LSA_BODY_FORMAT, data, offset)
+        body_available = len(data) - offset - ROUTER_LSA_BODY_LEN
+        if num_links > 0 and num_links * ROUTER_LINK_LEN > body_available:
+            raise ValueError(f"RouterLSA num_links {num_links} exceeds available data")
         pos = offset + ROUTER_LSA_BODY_LEN
         links = []
         for _ in range(num_links):
@@ -201,7 +206,7 @@ class RouterLsa:
 
 # ── Network LSA (Type 2) ───────────────────────────────────────────────────
 
-@dataclass
+@dataclass(slots=True)
 class NetworkLsa:
     """Type 2: Network LSA body."""
 
@@ -233,7 +238,7 @@ SUMMARY_LSA_BODY_FORMAT = "!4sBBH"  # mask(4), reserved(1), reserved(1), metric_
 # Actually: mask(4), then 1 byte zero, then 3 bytes metric
 # We'll handle it manually
 
-@dataclass
+@dataclass(slots=True)
 class SummaryLsa:
     """Type 3 (Network Summary) and Type 4 (ASBR Summary) LSA body."""
 
@@ -254,7 +259,7 @@ class SummaryLsa:
 
 # ── AS External LSA (Type 5) ───────────────────────────────────────────────
 
-@dataclass
+@dataclass(slots=True)
 class ExternalLsa:
     """Type 5: AS External LSA body."""
 
@@ -305,7 +310,15 @@ _BODY_DESERIALIZERS = {
 }
 
 
-@dataclass
+class _RawBody:
+    """Raw (opaque) LSA body — stores bytes without parsing."""
+    def __init__(self, data: bytes):
+        self.raw_data = data
+    def serialize(self) -> bytes:
+        return self.raw_data
+
+
+@dataclass(slots=True)
 class Lsa:
     """Complete LSA: header + body.
 
@@ -357,6 +370,10 @@ class Lsa:
         Returns (Lsa, bytes_consumed).
         """
         header = LsaHeader.deserialize(data[offset:])
+        if header.length < LSA_HDR_LEN:
+            raise ValueError(f"LSA length {header.length} < minimum {LSA_HDR_LEN}")
+        if header.length > len(data) - offset:
+            raise ValueError(f"LSA length {header.length} exceeds available data")
         body_offset = offset + LSA_HDR_LEN
         body_len = header.length - LSA_HDR_LEN
         body: Optional[LsaBody] = None
@@ -367,6 +384,9 @@ class Lsa:
                 body = deserializer(data, body_offset, length=body_len)
             else:
                 body = deserializer(data, body_offset)
+        elif deserializer is None and body_len > 0:
+            # Opaque or unknown LSA — store raw bytes
+            body = _RawBody(data[body_offset:body_offset + body_len])
 
         lsa = cls(header=header, body=body)
         return lsa, header.length

@@ -173,3 +173,56 @@ BACKBONE_AREA = IPv4Address("0.0.0.0")
 # Default priority
 DEFAULT_PRIORITY = 1
 DEFAULT_COST = 10
+
+# Opaque LSA types (RFC 5250)
+LSA_TYPE_OPAQUE_LINK = 9    # link-scoped
+LSA_TYPE_OPAQUE_AREA = 10   # area-scoped
+LSA_TYPE_OPAQUE_AS = 11     # AS-scoped
+
+# Opaque sub-types (upper byte of link_state_id)
+OPAQUE_TYPE_RI = 4           # Router Information (RFC 7770)
+OPAQUE_TYPE_EXTENDED_PREFIX = 7   # RFC 7684
+OPAQUE_TYPE_EXTENDED_LINK = 8     # RFC 7684
+
+# RI LSA TLV types (RFC 7770 / RFC 8665)
+RI_TLV_SR_CAPABILITIES = 2
+RI_TLV_SR_ALGORITHM = 19
+RI_TLV_SID_LABEL_RANGE = 9
+
+# Extended Prefix/Link TLV types (RFC 7684)
+EP_TLV_EXTENDED_PREFIX = 1
+EL_TLV_EXTENDED_LINK = 1
+
+# SR sub-TLV types
+SR_STLV_SID_LABEL = 1          # SID/Label value (within range TLVs)
+SR_STLV_PREFIX_SID = 2         # Prefix-SID (within Extended Prefix)
+SR_STLV_ADJ_SID = 2            # Adj-SID (within Extended Link)
+SR_STLV_LAN_ADJ_SID = 3        # LAN Adj-SID (within Extended Link)
+
+# SR algorithm values
+SR_ALG_SPF = 0
+SR_ALG_STRICT_SPF = 1
+
+# Prefix-SID flags
+PREFIX_SID_FLAG_NP = 0x40    # No-PHP
+PREFIX_SID_FLAG_M = 0x20     # Mapping Server
+PREFIX_SID_FLAG_E = 0x10     # Explicit-Null
+PREFIX_SID_FLAG_V = 0x08     # Value (absolute label, not index)
+PREFIX_SID_FLAG_L = 0x04     # Local
+
+# Adj-SID flags
+ADJ_SID_FLAG_B = 0x80        # Backup
+ADJ_SID_FLAG_V = 0x40        # Value (label, not index)
+ADJ_SID_FLAG_L = 0x20        # Local
+ADJ_SID_FLAG_G = 0x10        # Group
+ADJ_SID_FLAG_P = 0x08        # Persistent
+
+# MPLS label constants
+MPLS_LABEL_IMPLICIT_NULL = 3
+MPLS_LABEL_EXPLICIT_NULL = 0
+MPLS_LABEL_MIN_UNRESERVED = 16
+MPLS_LABEL_MAX = 0xFFFFF  # 20-bit label
+
+# Default SRGB
+SR_DEFAULT_SRGB_START = 16000
+SR_DEFAULT_SRGB_SIZE = 8000

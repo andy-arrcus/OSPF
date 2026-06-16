@@ -23,13 +23,11 @@ class PeriodicTimer:
 
     def __init__(
         self,
-        loop: asyncio.AbstractEventLoop,
         interval: float,
         callback: Callable[[], None],
         jitter: float = 0.0,
         name: str = "",
     ):
-        self._loop = loop
         self._interval = interval
         self._callback = callback
         self._jitter = jitter
@@ -62,7 +60,7 @@ class PeriodicTimer:
         delay = self._interval
         if self._jitter > 0:
             delay += random.uniform(0, self._interval * self._jitter)
-        self._handle = self._loop.call_later(delay, self._fire)
+        self._handle = asyncio.get_running_loop().call_later(delay, self._fire)
 
     def _fire(self) -> None:
         if not self._running:
@@ -87,12 +85,10 @@ class OneShotTimer:
 
     def __init__(
         self,
-        loop: asyncio.AbstractEventLoop,
         timeout: float,
         callback: Callable[[], None],
         name: str = "",
     ):
-        self._loop = loop
         self._timeout = timeout
         self._callback = callback
         self._name = name
@@ -101,7 +97,7 @@ class OneShotTimer:
     def start(self) -> None:
         """Start (or restart) the timer."""
         self.cancel()
-        self._handle = self._loop.call_later(self._timeout, self._fire)
+        self._handle = asyncio.get_running_loop().call_later(self._timeout, self._fire)
 
     def cancel(self) -> None:
         """Cancel the timer if running."""

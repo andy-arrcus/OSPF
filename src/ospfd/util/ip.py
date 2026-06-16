@@ -10,16 +10,7 @@ def mask_to_prefix_len(mask: IPv4Address) -> int:
 
     Example: IPv4Address('255.255.255.0') -> 24
     """
-    mask_int = int(mask)
-    if mask_int == 0:
-        return 0
-    # Count leading 1-bits
-    length = 0
-    bit = 1 << 31
-    while bit and (mask_int & bit):
-        length += 1
-        bit >>= 1
-    return length
+    return bin(int(mask)).count('1')
 
 
 def prefix_len_to_mask(prefix_len: int) -> IPv4Address:

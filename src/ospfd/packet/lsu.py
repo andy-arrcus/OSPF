@@ -42,10 +42,16 @@ class LsuPacket:
     @classmethod
     def deserialize(cls, data: bytes, offset: int = 0) -> LsuPacket:
         num_lsas = struct.unpack_from(LSU_HEADER_FORMAT, data, offset)[0]
+        if num_lsas > 1000:
+            raise ValueError(f"LSU num_lsas {num_lsas} exceeds limit")
         lsas = []
         pos = offset + LSU_HEADER_LEN
         for _ in range(num_lsas):
+            if pos >= len(data):
+                break
             lsa, consumed = Lsa.deserialize(data, pos)
+            if consumed == 0:
+                break
             lsas.append(lsa)
             pos += consumed
         return cls(lsas=lsas)

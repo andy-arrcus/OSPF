@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 import os
 import struct
+from collections import deque
 from ipaddress import IPv4Address
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from ospfd.const import (
     DD_FLAG_I,
@@ -55,7 +56,6 @@ from ospfd.packet.lsa import LsaHeader, Lsa
 from ospfd.packet.lsr import LsrItem, LsrPacket
 
 if TYPE_CHECKING:
-    import asyncio
     from ospfd.protocol.interface import OspfInterface
 
 logger = logging.getLogger(__name__)
@@ -73,12 +73,10 @@ class OspfNeighbor:
         router_id: IPv4Address,
         ip_addr: IPv4Address,
         interface: OspfInterface,
-        loop: asyncio.AbstractEventLoop,
     ):
         self.router_id = router_id
         self.ip_addr = ip_addr
         self.interface = interface
-        self._loop = loop
 
         # State
         self.state: int = NBR_STATE_DOWN
@@ -97,23 +95,23 @@ class OspfNeighbor:
         self.last_received_dd: Optional[DDPacket] = None
 
         # Lists per Section 10
-        self.db_summary_list: list[LsaHeader] = []
-        self.ls_request_list: list[LsaHeader] = []
-        self.ls_retransmission_list: list[Lsa] = []
+        self.db_summary_list: deque[LsaHeader] = deque()
+        self.ls_request_list: dict[tuple, LsaHeader] = {}
+        self.ls_retransmission_list: dict[tuple, Lsa] = {}
 
         # Timers
         from ospfd.util.timer import OneShotTimer, PeriodicTimer
 
         self._inactivity_timer = OneShotTimer(
-            loop, interface.dead_interval, self._inactivity_timeout,
+            interface.dead_interval, self._inactivity_timeout,
             name=f"inactivity-{router_id}",
         )
         self._rxmt_timer = PeriodicTimer(
-            loop, interface.retransmit_interval, self._rxmt_timeout,
+            interface.retransmit_interval, self._rxmt_timeout,
             name=f"rxmt-{router_id}",
         )
         self._dd_rxmt_timer = PeriodicTimer(
-            loop, interface.retransmit_interval, self._dd_rxmt_timeout,
+            interface.retransmit_interval, self._dd_rxmt_timeout,
             name=f"dd-rxmt-{router_id}",
         )
 
@@ -231,7 +229,7 @@ class OspfNeighbor:
 
     # ── FSM Transition Table ────────────────────────────────────────
 
-    _FSM: dict[tuple[int, int], callable] = {}
+    _FSM: dict[tuple[int, int], Callable[[OspfNeighbor], None]] = {}
 
     @classmethod
     def _build_fsm(cls) -> None:
@@ -447,12 +445,12 @@ class OspfNeighbor:
             )
             if existing is None or instance.lsdb.compare_lsa(hdr, existing.header) > 0:
                 # We need this LSA
-                self.ls_request_list.append(hdr)
+                self.ls_request_list[hdr.key] = hdr
 
     def _build_db_summary(self) -> None:
         """Build the db_summary_list from the LSDB."""
         instance = self.interface.instance
-        self.db_summary_list = instance.lsdb.get_all_headers(self.interface.area_id)
+        self.db_summary_list = deque(instance.lsdb.get_all_headers(self.interface.area_id))
 
     def _is_duplicate_dd(self, dd: DDPacket) -> bool:
         """Check if this DD is a duplicate of the last received."""
@@ -485,7 +483,7 @@ class OspfNeighbor:
         # Fill up to MTU - headers
         max_headers = (self.interface.mtu - 24 - 8) // 20  # OSPF hdr + DD hdr
         while self.db_summary_list and len(headers) < max_headers:
-            headers.append(self.db_summary_list.pop(0))
+            headers.append(self.db_summary_list.popleft())
 
         flags = 0
         if self.db_summary_list:
@@ -499,7 +497,7 @@ class OspfNeighbor:
         headers = []
         max_headers = (self.interface.mtu - 24 - 8) // 20
         while self.db_summary_list and len(headers) < max_headers:
-            headers.append(self.db_summary_list.pop(0))
+            headers.append(self.db_summary_list.popleft())
 
         flags = 0
         if self.db_summary_list:
@@ -523,7 +521,7 @@ class OspfNeighbor:
             return
         items = []
         # Send up to ~10 items per request
-        batch = self.ls_request_list[:10]
+        batch = list(self.ls_request_list.values())[:10]
         for hdr in batch:
             items.append(LsrItem(
                 ls_type=hdr.ls_type,
@@ -558,13 +556,9 @@ class OspfNeighbor:
         for lsa in lsas:
             # Remove from request list if present
             key = lsa.key
-            self.ls_request_list = [
-                h for h in self.ls_request_list if h.key != key
-            ]
+            self.ls_request_list.pop(key, None)
             # Also remove from retransmission list
-            self.ls_retransmission_list = [
-                l for l in self.ls_retransmission_list if l.key != key
-            ]
+            self.ls_retransmission_list.pop(key, None)
 
         # Check if loading is done
         if self.state == NBR_STATE_LOADING and not self.ls_request_list:
@@ -573,10 +567,7 @@ class OspfNeighbor:
     def process_ls_ack(self, headers: list[LsaHeader]) -> None:
         """Handle LS Acknowledgment — remove from retransmission list."""
         for hdr in headers:
-            self.ls_retransmission_list = [
-                l for l in self.ls_retransmission_list
-                if l.key != hdr.key
-            ]
+            self.ls_retransmission_list.pop(hdr.key, None)
 
     # ── List Management ─────────────────────────────────────────────
 
